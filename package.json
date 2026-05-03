@@ -1,0 +1,8 @@
+{
+  "name": "ai-driven-api-automation-ci-gating",
+  "private": true,
+  "description": "Pins @playwright/test at the repo root so scripts/playwright.config.ts and generated_test/**/*.spec.ts resolve the same install as the Playwright CLI.",
+  "devDependencies": {
+    "@playwright/test": "1.55.1"
+  }
+}

@@ -23,6 +23,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: |
+            package-lock.json
             playwright_template/package-lock.json
             application_code/package-lock.json
 
@@ -42,11 +43,11 @@ jobs:
             exit 1
           fi
 
-      - name: Install dependencies (Playwright template + app)
-        run: npm ci --prefix playwright_template && npm ci --prefix application_code
+      - name: Install dependencies (root Playwright + template + app)
+        run: npm ci && npm ci --prefix playwright_template && npm ci --prefix application_code
 
       - name: Install Playwright browsers
-        run: npm exec --prefix playwright_template -- playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium
 
       - name: Generate tests (Gemini)
         env:
@@ -58,7 +59,7 @@ jobs:
         env:
           CI: true
           NODE_OPTIONS: --max-old-space-size=6144
-        run: npm exec --prefix playwright_template -- playwright test -c scripts/playwright.config.ts
+        run: npx playwright test -c scripts/playwright.config.ts
 
       - name: Upload HTML report
         if: always()

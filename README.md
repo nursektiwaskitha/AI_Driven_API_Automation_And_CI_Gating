@@ -6,9 +6,9 @@ This submission implements an LLM-powered Playwright test generator, runs genera
 
 ### Where Playwright config / package / ignores live
 
-- **`playwright_template/package.json`** — the only place **`@playwright/test`** is installed (per the provided template). Run the CLI with `npm exec --prefix playwright_template -- playwright …`.
-- **`scripts/playwright.config.ts`** — integration config (servers + `generated_test/` projects). It is **not** a duplicate of `playwright_template/playwright.config.ts`; the assessment forbids changing the **template** config, which still targets `./tests` only.
-- **No root `package.json`** — avoids duplicating the template’s npm manifest; CI and README use explicit `npm ci --prefix …` / `npm exec --prefix playwright_template` commands.
+- **Root `package.json` + `package-lock.json`** — pins **`@playwright/test`** so `scripts/playwright.config.ts` (under `scripts/`) and `generated_test/**/*.spec.ts` resolve the **same** module as **`npx playwright`** from the repo root. Without this, Node cannot find `@playwright/test` from the config path, or the CLI and specs can load two different copies and Playwright throws.
+- **`playwright_template/package.json`** — unchanged supplied template; CI still runs **`npm ci --prefix playwright_template`** for ESLint/Prettier/TypeScript tooling there. The **test runner** for this repo uses the root install.
+- **`scripts/playwright.config.ts`** — integration config (servers + `generated_test/` projects). It is **not** a duplicate of `playwright_template/playwright.config.ts`; the template config still targets `./tests` only.
 - **Minimal root `.gitignore` only** — Git ignores in `playwright_template/.gitignore` do **not** apply to sibling paths like `generated_test/` or repo-root `playwright-report/`. A tiny root `.gitignore` is required so those paths are never committed.
 
 ### `playwright-report/` and `test-results/`
@@ -42,19 +42,20 @@ node scripts/generate-tests.js
 ## Running tests locally
 
 ```bash
+npm ci
 npm ci --prefix playwright_template
 npm ci --prefix application_code
-npm exec --prefix playwright_template -- playwright install --with-deps chromium
+npx playwright install --with-deps chromium
 export LLM_API_KEY="your-gemini-key"
 node scripts/generate-tests.js
-npm exec --prefix playwright_template -- playwright test -c scripts/playwright.config.ts
+npx playwright test -c scripts/playwright.config.ts
 ```
 
-`scripts/playwright.config.ts` starts `go run main.go` (port **8080**) and `npm run dev` for Next (port **3000**) with `cwd` set to `application_code/`, then runs specs under `generated_test/`.
+The config starts `go run main.go` (port **8080**) and `npm run dev` for Next (port **3000**) with `cwd` set to `application_code/`, then runs specs under `generated_test/`.
 
 ## How CI gates merges
 
-`.github/workflows/ci.yml` runs `npm ci --prefix playwright_template` and `npm ci --prefix application_code`, installs Chromium via the template’s Playwright package, runs `node scripts/generate-tests.js` with `secrets.LLM_API_KEY`, then `playwright test -c scripts/playwright.config.ts`. HTML and JUnit artifacts are uploaded from the repo root output folders.
+`.github/workflows/ci.yml` runs **`npm ci`** at the repo root (Playwright runner), `npm ci --prefix playwright_template`, and `npm ci --prefix application_code`, installs Chromium with **`npx playwright install`**, runs `node scripts/generate-tests.js` with `secrets.LLM_API_KEY`, then **`npx playwright test -c scripts/playwright.config.ts`**. HTML and JUnit artifacts are uploaded from the repo root output folders.
 
 ### Secrets
 
@@ -68,6 +69,8 @@ npm exec --prefix playwright_template -- playwright test -c scripts/playwright.c
 3. **`npm ci` … `package-lock.json`** — `npm ci` in `application_code/` requires a committed **`application_code/package-lock.json`**. It was previously gitignored; remove that ignore line, run `npm install` in `application_code/`, and commit the lockfile.
 4. **No `playwright-report/` or `test-results/` artifacts** — Usually means Playwright exited before reporters wrote files (e.g. generation failed, webServer timeout, or tests crashed immediately). Open the failed step log above the artifact warnings.
 5. **Node / Actions deprecation notices** — The workflow pins current majors (`checkout@v6`, `setup-node@v6`, `setup-go@v6`, `upload-artifact@v6`) so the **Actions runtime** uses Node.js 24 per GitHub’s timeline. Your **app** still runs on **Node 22** via `node-version` in `setup-node` (Next/Playwright compatible).
+6. **`Cannot find module '@playwright/test'`** — Run **`npm ci`** at the repo root so `node_modules/@playwright/test` exists (see root `package.json`). Use **`npx playwright`** from the root, not only `npm exec --prefix playwright_template`, so the CLI and generated specs use the same install.
+7. **`Requiring @playwright/test second time` / `did not expect test.describe()`** — Usually two different installs (e.g. CLI from `playwright_template` while specs resolve another copy). Prefer root **`npm ci`** + **`npx playwright test`** as in this README.
 
 ## Scaling to many endpoints
 
