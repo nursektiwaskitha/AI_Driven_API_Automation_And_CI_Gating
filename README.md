@@ -65,8 +65,9 @@ npm exec --prefix playwright_template -- playwright test -c scripts/playwright.c
 
 1. **`LLM_API_KEY` missing** — The workflow fails fast with an error if the secret is empty. Fork pull requests do not receive repository secrets; run CI from a branch on the same repo or use a maintainer flow that supplies the key.
 2. **`Restore cache failed … go.sum`** — Ensure `application_code/go.sum` is committed (generated with `go mod tidy` in `application_code/`). `setup-go` caches modules using that file.
-3. **No `playwright-report/` or `test-results/` artifacts** — Usually means Playwright exited before reporters wrote files (e.g. generation failed, webServer timeout, or tests crashed immediately). Open the failed step log above the artifact warnings.
-4. **Node / Actions deprecation notices** — The workflow pins current majors (`checkout@v6`, `setup-node@v6`, `setup-go@v6`, `upload-artifact@v6`) so the **Actions runtime** uses Node.js 24 per GitHub’s timeline. Your **app** still runs on **Node 22** via `node-version` in `setup-node` (Next/Playwright compatible).
+3. **`npm ci` … `package-lock.json`** — `npm ci` in `application_code/` requires a committed **`application_code/package-lock.json`**. It was previously gitignored; remove that ignore line, run `npm install` in `application_code/`, and commit the lockfile.
+4. **No `playwright-report/` or `test-results/` artifacts** — Usually means Playwright exited before reporters wrote files (e.g. generation failed, webServer timeout, or tests crashed immediately). Open the failed step log above the artifact warnings.
+5. **Node / Actions deprecation notices** — The workflow pins current majors (`checkout@v6`, `setup-node@v6`, `setup-go@v6`, `upload-artifact@v6`) so the **Actions runtime** uses Node.js 24 per GitHub’s timeline. Your **app** still runs on **Node 22** via `node-version` in `setup-node` (Next/Playwright compatible).
 
 ## Scaling to many endpoints
 
