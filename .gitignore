@@ -1,0 +1,7 @@
+# Required at repo root: git does not apply playwright_template/.gitignore to sibling paths
+# (generated_test/, .cache/, reports next to the repo root).
+.cache/
+node_modules/
+generated_test/**/*.spec.ts
+playwright-report/
+test-results/
