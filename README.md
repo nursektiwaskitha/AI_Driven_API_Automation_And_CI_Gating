@@ -61,6 +61,13 @@ npm exec --prefix playwright_template -- playwright test -c scripts/playwright.c
 - **Local**: `export LLM_API_KEY=...`
 - **GitHub**: Repository secret `LLM_API_KEY` (never committed).
 
+### CI job failed?
+
+1. **`LLM_API_KEY` missing** — The workflow fails fast with an error if the secret is empty. Fork pull requests do not receive repository secrets; run CI from a branch on the same repo or use a maintainer flow that supplies the key.
+2. **`Restore cache failed … go.sum`** — Ensure `application_code/go.sum` is committed (generated with `go mod tidy` in `application_code/`). `setup-go` caches modules using that file.
+3. **No `playwright-report/` or `test-results/` artifacts** — Usually means Playwright exited before reporters wrote files (e.g. generation failed, webServer timeout, or tests crashed immediately). Open the failed step log above the artifact warnings.
+4. **Node / Actions deprecation notices** — Warnings only; the workflow uses Node 22. Upgrade `actions/*` versions when you next touch the file.
+
 ## Scaling to many endpoints
 
 - Chunk Swagger by tag or path prefix; emit one file per chunk.

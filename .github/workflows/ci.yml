@@ -9,6 +9,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
 
     steps:
       - name: Checkout repo
@@ -17,7 +20,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: playwright_template/package-lock.json
 
@@ -25,6 +28,17 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.21'
+          cache: true
+          cache-dependency-path: application_code/go.sum
+
+      - name: Verify LLM secret
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          if [ -z "$LLM_API_KEY" ]; then
+            echo "::error::Repository secret LLM_API_KEY is not set (or unavailable on fork PRs). Add it under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
 
       - name: Install dependencies (Playwright template + app)
         run: npm ci --prefix playwright_template && npm ci --prefix application_code
@@ -41,15 +55,16 @@ jobs:
       - name: Run Playwright (API + E2E)
         env:
           CI: true
+          NODE_OPTIONS: --max-old-space-size=6144
         run: npm exec --prefix playwright_template -- playwright test -c scripts/playwright.config.ts
 
-      # Assessment: "Produce test logs or artifacts" — upload CI outputs; do not commit these folders to git.
       - name: Upload HTML report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
           path: playwright-report/
+          if-no-files-found: ignore
 
       - name: Upload JUnit results
         if: always()
@@ -57,3 +72,4 @@ jobs:
         with:
           name: test-results
           path: test-results/
+          if-no-files-found: ignore
