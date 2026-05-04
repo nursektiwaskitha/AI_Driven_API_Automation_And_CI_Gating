@@ -2,6 +2,8 @@
 
 This submission implements an LLM-powered Playwright test generator, runs generated specs from `generated_test/`, starts the Go API and Next.js checkout app, and gates CI on generation plus execution.
 
+**SDET assessment alignment:** The brief describes a generic checkout (e.g. name, shipping address, email). The **provided** app here is a **payment-style** checkout (`application_code/app/page.tsx`: email, card, expiry, CVV, amount, submit, success state). E2E tests are **LLM-generated from that source**, so they cover the **real** end-to-end “fill → pay → success” flow for the supplied UI—matching the assessment’s intent (programmatic E2E + user-visible outcome) even though field names differ from the PDF example.
+
 **Provided folders stay untouched:** `playwright_template/` and `application_code/` are the supplied zips (not edited for this flow). The generator **reads** `application_code` (Swagger, `page.tsx`) and **reads** the template’s `example-api.spec.ts` as prompt context only.
 
 ### Where Playwright config / package / ignores live
@@ -57,7 +59,11 @@ The config starts `go run main.go` (port **8080**) and `npm run dev` for Next (p
 
 ## How CI gates merges
 
-`.github/workflows/ci.yml` runs **`npm ci`** at the repo root (Playwright runner), `npm ci --prefix playwright_template`, and `npm ci --prefix application_code`, installs Chromium with **`npx playwright install`**, runs `node scripts/generate-tests.js` with `secrets.LLM_API_KEY`, then **`npx playwright test`** (root `playwright.config.ts` re-exports `scripts/playwright.config.ts`). HTML and JUnit artifacts are uploaded from the repo root output folders.
+Workflow file: **`.github/workflows/ci.yml`** (standard GitHub Actions location; the PDF’s suggested `scripts/github_action.yaml` layout is equivalent).
+
+**Triggers:** `push` to **`main`**, **`pull_request`**, and **`workflow_dispatch`**. Use **Actions → “AI Test Generation & Quality Gate” → Run workflow** to run **generate + Playwright** on demand without pushing a commit (still uses branch code + repo **secrets**).
+
+The job runs **`npm ci`** at the repo root (Playwright runner), `npm ci --prefix playwright_template`, and `npm ci --prefix application_code`, installs Chromium with **`npx playwright install`**, runs **`node scripts/generate-tests.js`** with **`secrets.LLM_API_KEY`**, then **`npx playwright test`** (root `playwright.config.ts` re-exports `scripts/playwright.config.ts`). HTML and JUnit artifacts are uploaded from the repo root output folders. A failing Playwright step **fails the check**, so PRs are gated the same way a deployment gate would use this workflow.
 
 ### Secrets
 
@@ -110,6 +116,7 @@ The config starts `go run main.go` (port **8080**) and `npm run dev` for Next (p
 .
 ├── README.md
 ├── .gitignore                # minimal — only paths outside playwright_template/ (see above)
+├── .github/workflows/ci.yml  # quality gate: install → generate tests → Playwright → artifacts
 ├── scripts/
 │   ├── generate-tests.js
 │   └── playwright.config.ts  # integration runner config (template config unchanged)
@@ -123,3 +130,5 @@ The config starts `go run main.go` (port **8080**) and `npm run dev` for Next (p
 ## PDF vs. your constraint
 
 The written assessment says **not to modify the Playwright configuration template** (and you are also treating **`application_code/`** as read-only). This layout satisfies that: the stock `playwright_template/playwright.config.ts` and `application_code/next.config.js` stay as supplied; integration is in **`scripts/`** (generator + `scripts/playwright.config.ts`) plus **`.github/workflows/`**, with a **minimal root `.gitignore`** only where Git requires it.
+
+**README vs. PDF checklist (concise):** (1) Prompt design — § “LLM prompt design”. (2) Swagger → Playwright — § “How Swagger becomes Playwright tests”. (3) Generation — § “Generation workflow”. (4) CI gate — § “How CI gates merges”. (5) Scale — § “Scaling to many endpoints”. (6) Hallucinations — § “Detecting bad / hallucinated tests”. (7–9) Flaky / unstable / E2E selectors — § “Flaky API / UI tests” and “E2E selector stability”. **Secrets** — § “Secrets”. **Bonus** signals — § “Bonus features included”.
