@@ -57,11 +57,13 @@ STYLE & STRUCTURE (TypeScript / Playwright):
 PLAYWRIGHT PATTERNS:
 - Use official fixture patterns (${kind === "api" ? "`{ request }` only" : "`{ page }` only"}).
 - Keep tests atomic: no shared mutable state between tests; no order dependency.
-${kind === "api" ? "- API tests may use test.describe.parallel at the describe level if every test is fully independent (optional)." : ""}
+${kind === "api" ? `- API tests may use test.describe.parallel at the describe level if every test is fully independent (optional).
+- **toHaveProperty(key, value?)** — With two args, \`value\` is an **equality** check on \`obj[key]\`, not a custom failure string. Prefer \`toMatchObject\`, \`expect(obj.field, '…').toBe(…)\`, or \`expect(obj, '…').toHaveProperty('field')\` (single key) then assert values separately.` : ""}
 
 LOCATOR & ACCESSIBILITY (${kind === "e2e" ? "E2E" : "N/A for API"}):
 ${kind === "e2e" ? `- Prefer getByRole / getByTestId when data-testid exists in the provided source; otherwise stable locators from source (e.g. input[name="…"]).
 - Prefer user-facing strings and roles (accessibility-friendly) over CSS class chains and never assert rgb()/border colors.
+- Never use long Tailwind class strings as locators (e.g. \`text-yellow-600\`, \`text-red-600\` chains) — use getByText / getByRole against visible copy from the source.
 - Keyboard: optional tab/Enter only if it matches real UX; do not over-engineer screen-reader simulation.` : "- (API tests: no DOM locators.)"}
 
 OUT OF SCOPE — DO NOT OUTPUT (missing deps or multi-file layout):
@@ -161,6 +163,12 @@ function validatePlaywrightCode(code, kind) {
         "E2E output must not use the { request } fixture — use { page } only in every test"
       );
     }
+    // Button label and status banner both contain "Backend Status" → strict mode duplicate match.
+    if (/getByText\(\s*\/backend status\/i\s*\)/i.test(code)) {
+      throw new Error(
+        "Avoid getByText(/backend status/i) — matches button + banner; use a narrower pattern (see E2E prompt)"
+      );
+    }
   }
 
   if (/\btest\.(only|skip)\s*\(/.test(code)) {
@@ -181,6 +189,12 @@ function validatePlaywrightCode(code, kind) {
   ) {
     throw new Error(
       "API tests must use relative URLs for request.* calls; baseURL is configured"
+    );
+  }
+
+  if (kind === "api" && /main\.PaymentRequest/i.test(code)) {
+    throw new Error(
+      "Do not assert full Go type paths like main.PaymentRequest in error strings — json errors use PaymentRequest without main. prefix"
     );
   }
 }
@@ -207,28 +221,25 @@ function safeWrite(filePath, content) {
   fs.renameSync(tempPath, filePath);
 }
 
-/** Implementation truth for this repo (Go handlers may differ from Swagger error codes). */
+/** Implementation truth for this repo (Go handlers may differ from Swagger / OpenAPI prose). */
 function apiImplementationNotes() {
   return `
-BACKEND BEHAVIOR (trust these over optimistic Swagger prose; assert what the server actually does):
+BACKEND BEHAVIOR (assert what handlers return, not guessed framework strings):
 
-- GET /api/health → 200 JSON { status: "healthy", message: string } (message mentions server/running).
+- GET /api/health → 200 { status: "healthy", message: string } (message relates to server running).
 
-- POST /api/checkout → Body JSON { cardNumber, expiry, cvv, amount } (amount is a number).
-  Decode error / invalid JSON → 400 { error: string }.
-  Successful decode → always 200 { status: "success", message } (mock: no CVV/card field validation).
-  Malformed JSON: use request.fetch('/api/checkout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, data: '{not-json' }) so the body is not auto-repaired.
+- POST /api/checkout → JSON { cardNumber, expiry, cvv, amount } (\`amount\` is numeric). Success → 200 { status: "success", message }.
+  Decode / type errors → 400 { error: string }; \`error\` starts **Invalid request:** then Go's json detail — **varies a lot** (truncated JSON vs wrong types vs …). Prefer \`toMatch(/^Invalid request:/)\` plus a **broad** tail (\`/json:|cannot unmarshal|invalid character|unexpected end/i\` — any one is enough) or only assert **status 400** + non-empty \`error\`. **Never** require one exact Go phrase (e.g. only \`unexpected end of JSON input\`) or the full struct path (\`main.PaymentRequest\` vs \`PaymentRequest\` differs by build).
+  To send a **raw broken JSON string**, use **request.fetch** with \`Content-Type: application/json\` and \`data\` as the raw string (avoid relying on \`request.post\` to forward malformed bodies unchanged).
 
-- POST /api/validate-card → 200 { valid: boolean, message: string } for decodable JSON.
-  Valid Luhn example: 4242424242424242. Invalid Luhn example: 1111111111111111.
-  Invalid JSON → 400 { error }. Wrong property names → often still 200 with valid:false for empty/short PAN.
+- POST /api/validate-card → decodable JSON → 200 { valid, message }; Luhn-valid PAN example 4242424242424242, invalid 1111111111111111. JSON decode failure → 400 { error: **"Invalid request"** } (static). Odd field names may still decode → often 200 with valid:false.
+  **Real handler messages (ignore Swagger examples):** valid Luhn → \`message\` is **"Card number validated"**; invalid / empty PAN failing Luhn → **"Invalid card number (Luhn check failed)"**. Assert with \`/validated|valid/i\` or \`/Luhn|invalid card/i\` — do **not** require OpenAPI wording like "Card number is valid".
 
-- POST /api/validate-email → Always HTTP 500 { error: string } in this codebase (service unavailable). Never expect 2xx.
+- POST /api/validate-email → Valid JSON body → **500** { error: **"Email validation service temporarily unavailable"** } (handler always returns this after decode). Malformed JSON before decode → **400** { error: **"Invalid request"** } (same static as validate-card) — **different** shape from checkout's **Invalid request:** + Go detail.
 
 CONVENTIONS:
-- Use ONLY relative paths (/api/...). Never hardcode http://localhost or http://127.0.0.1 in request URLs.
-- Prefer expect(body).toMatchObject(partial) or field-level expects + toMatch(/.../i) for messages to reduce brittleness.
-- Group related cases in test.describe('Payment API', () => { ... }).
+- Relative URLs only (/api/...). Prefer **toMatchObject** / field-level **expect** over fragile string literals.
+- Group endpoints in test.describe as makes sense.
 `;
 }
 
@@ -262,12 +273,10 @@ Full OpenAPI document (JSON):
 ${swagger}
 
 TASK:
-- Produce one file: import { test, expect } from '@playwright/test';
-- Every test uses async ({ request }) => { ... } and the built-in request fixture (no ApiHelper).
-- Minimum coverage: health GET; checkout happy path; checkout malformed JSON → 400; validate-card valid + invalid Luhn; validate-email → 500.
-- Use JSON assertions that tolerate minor message wording: toMatch, toContain, toHaveProperty, toMatchObject.
-- One top-level test.describe naming the API suite.
-- Return ONLY the TypeScript source (no markdown).
+- Produce one file: import { test, expect } from '@playwright/test'; every test uses async ({ request }) => { ... } (no ApiHelper).
+- Cover health, checkout (success + at least one 400 path), validate-card (Luhn + malformed JSON), validate-email (500 on valid body; optional 400 on bad JSON if you add that case).
+- Assertions: match **BACKEND BEHAVIOR**; OpenAPI **example** strings for \`message\` / errors are often wrong — do not copy them for validate-card or checkout errors. Use tolerant matchers where Go text varies; use **exact** strings only for static bodies (e.g. validate-email 500, decode-failure **Invalid request**).
+- One top-level test.describe naming the API suite; return ONLY the TypeScript source (no markdown).
 `;
 }
 
@@ -281,6 +290,10 @@ CRITICAL SCOPE (violations will fail validation):
 - ONE primary goal: complete the payment checkout form and assert success on the page. Prefer ONE test() inside ONE test.describe('Checkout UI', ...).
 
 RUNTIME CONTEXT (one line): CI starts the Go API on :8080 and Next on :3000; the browser page calls the API as the real app does.
+
+EMAIL / API COUPLING (read page.tsx — blur calls /api/validate-email):
+- That endpoint returns **500** for valid requests in this app; the UI may show a **non-blocking** warning but still allows checkout. Do **not** require "no warning" before paying unless the source shows the field is cleared on success only.
+- Prefer **user-visible text** (getByText / roles) over CSS class chains for any warning copy.
 
 PAGE COPY YOU MUST MATCH (from this codebase):
 - Main heading text includes: "Secure Checkout"
@@ -301,14 +314,11 @@ MANDATORY HAPPY-PATH STEPS (single test preferred):
 5. await expect(page.getByText(/payment processed successfully/i)).toBeVisible({ timeout: 30000 })
 
 FORBIDDEN IN THIS FILE:
-- Any APIRequestContext / request fixture usage
-- Describing or testing /api/health, /api/checkout, validate-card, validate-email with request.* (wrong file)
-- Assertions on Tailwind/CSS class strings, rgb()/border colors, or long chained class selectors (brittle)
-- Spinner visibility races (do not assert svg.animate-spin sequences)
-- test.beforeEach that only exists to run API checks
-- Hardcoded page.waitForTimeout except as last resort (prefer Playwright auto-wait + expect timeouts)
+- Using \`{ request }\` or \`request.get/post/...\` (API tests live in generated_test/api only)
+- Brittle locators: long Tailwind class chains, rgb/color assertions
+- test.beforeEach used only to duplicate API checks; avoid arbitrary page.waitForTimeout
 
-ALLOWED EXTRAS (optional, second test only if short): click "Check Backend status" style button and assert some healthy text — still { page } only.
+OPTIONAL second test: click **Check Backend Status** (see page.tsx). After the click, status is shown in the **message** banner (e.g. \`🟢 Backend Status: … - …\` or the red offline copy). **Strict mode:** \`getByText(/backend status/i)\` matches **both** the button and the banner → Playwright fails. Use a **narrower** locator: e.g. \`getByText(/Backend Status:.*-/)\`, \`getByText(/Server is running/i)\`, or \`page.getByRole('button', { name: /check backend status/i }).locator('..').locator('..')\` then assert a sibling — **not** a bare \`/backend status/i\` on the whole page.
 
 Return ONLY TypeScript source (no markdown).
 `;
@@ -367,7 +377,7 @@ async function generateApiTests(root, cacheDir, useCache) {
     );
   }
 
-  const cacheKey = `${hashContent(swagger + "|api-prompt-v2")}`;
+  const cacheKey = `${hashContent(swagger + "|api-prompt-v8")}`;
   const prompt = wrapPrompt(buildApiPrompt(swagger, example), "api");
   const code = await generateWithCache({
     prompt,
@@ -398,7 +408,7 @@ async function generateE2ETests(root, cacheDir, useCache) {
     );
   }
 
-  const cacheKey = hashContent(uiSource + "|e2e-prompt-v2");
+  const cacheKey = hashContent(uiSource + "|e2e-prompt-v5");
   const prompt = wrapPrompt(buildE2EPrompt(uiSource), "e2e");
   const code = await generateWithCache({
     prompt,

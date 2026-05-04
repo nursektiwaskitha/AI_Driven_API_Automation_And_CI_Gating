@@ -1,6 +1,7 @@
 name: AI Test Generation & Quality Gate
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches: [main]
@@ -59,7 +60,7 @@ jobs:
         env:
           CI: true
           NODE_OPTIONS: --max-old-space-size=6144
-        run: npx playwright test -c scripts/playwright.config.ts
+        run: npx playwright test
 
       - name: Upload HTML report
         if: always()

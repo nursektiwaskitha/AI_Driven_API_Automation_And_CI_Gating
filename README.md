@@ -8,6 +8,7 @@ This submission implements an LLM-powered Playwright test generator, runs genera
 
 - **Root `package.json` + `package-lock.json`** — pins **`@playwright/test`** so `scripts/playwright.config.ts` (under `scripts/`) and `generated_test/**/*.spec.ts` resolve the **same** module as **`npx playwright`** from the repo root. Without this, Node cannot find `@playwright/test` from the config path, or the CLI and specs can load two different copies and Playwright throws.
 - **`playwright_template/package.json`** — unchanged supplied template; CI still runs **`npm ci --prefix playwright_template`** for ESLint/Prettier/TypeScript tooling there. The **test runner** for this repo uses the root install.
+- **Root `playwright.config.ts`** — re-exports **`scripts/playwright.config.ts`** so a bare **`npx playwright test`** from the repo root does not fall back to scanning the tree (which would load `playwright_template/tests/**` with a **second** `@playwright/test` and trigger “did not expect test.describe()”).
 - **`scripts/playwright.config.ts`** — integration config (servers + `generated_test/` projects). It is **not** a duplicate of `playwright_template/playwright.config.ts`; the template config still targets `./tests` only.
 - **Minimal root `.gitignore` only** — Git ignores in `playwright_template/.gitignore` do **not** apply to sibling paths like `generated_test/` or repo-root `playwright-report/`. A tiny root `.gitignore` is required so those paths are never committed.
 
@@ -48,14 +49,15 @@ npm ci --prefix application_code
 npx playwright install --with-deps chromium
 export LLM_API_KEY="your-gemini-key"
 node scripts/generate-tests.js
-npx playwright test -c scripts/playwright.config.ts
+npx playwright test
+# same as: npx playwright test -c scripts/playwright.config.ts (root playwright.config.ts re-exports it)
 ```
 
 The config starts `go run main.go` (port **8080**) and `npm run dev` for Next (port **3000**) with `cwd` set to `application_code/`, then runs specs under `generated_test/`.
 
 ## How CI gates merges
 
-`.github/workflows/ci.yml` runs **`npm ci`** at the repo root (Playwright runner), `npm ci --prefix playwright_template`, and `npm ci --prefix application_code`, installs Chromium with **`npx playwright install`**, runs `node scripts/generate-tests.js` with `secrets.LLM_API_KEY`, then **`npx playwright test -c scripts/playwright.config.ts`**. HTML and JUnit artifacts are uploaded from the repo root output folders.
+`.github/workflows/ci.yml` runs **`npm ci`** at the repo root (Playwright runner), `npm ci --prefix playwright_template`, and `npm ci --prefix application_code`, installs Chromium with **`npx playwright install`**, runs `node scripts/generate-tests.js` with `secrets.LLM_API_KEY`, then **`npx playwright test`** (root `playwright.config.ts` re-exports `scripts/playwright.config.ts`). HTML and JUnit artifacts are uploaded from the repo root output folders.
 
 ### Secrets
 
