@@ -1,39 +1,89 @@
 # AI-Driven API Automation & CI Gating
 
-This submission implements an LLM-powered Playwright test generator, runs generated specs from `generated_test/`, starts the Go API and Next.js checkout app, and gates CI on generation plus execution.
+LLM-generated Playwright API and E2E tests, run against the bundled Go API + Next checkout app, with GitHub Actions as the quality gate.
 
-**SDET assessment alignment:** The brief describes a generic checkout (e.g. name, shipping address, email). The **provided** app here is a **payment-style** checkout (`application_code/app/page.tsx`: email, card, expiry, CVV, amount, submit, success state). E2E tests are **LLM-generated from that source**, so they cover the **real** end-to-end “fill → pay → success” flow for the supplied UI—matching the assessment’s intent (programmatic E2E + user-visible outcome) even though field names differ from the PDF example.
+## First time here?
 
-**Provided folders stay untouched:** `playwright_template/` and `application_code/` are the supplied zips (not edited for this flow). The generator **reads** `application_code` (Swagger, `page.tsx`) and **reads** the template’s `example-api.spec.ts` as prompt context only.
+1. **Clone** the repo. You need **Node** (see CI: 22), **Go**, and a **Gemini API key** as `LLM_API_KEY`.
+2. **Important:** `generated_test/**/generated.spec.ts` is **not** committed. Tests are created by `scripts/generate-tests.js` (locally or in CI).
+3. **Fastest check:** set the `LLM_API_KEY` secret on GitHub, open **Actions → “AI Test Generation & Quality Gate” → Run workflow**, then open artifacts if anything fails.
+4. **Local:** install deps (see [Running tests locally](#running-tests-locally)), `export LLM_API_KEY=…`, run `node scripts/generate-tests.js`, then `npx playwright test`.
 
-### Where Playwright config / package / ignores live
+**Contents:** [PDF checklist 1-9](#assessment-readme-pdf-checklist-1-9) · [Repo map](#repo-map) · [Prompts & generation](#llm-prompt-design) · [CI](#how-ci-gates-merges) · [Local run](#running-tests-locally) · [Scaling & quality](#scaling-to-many-endpoints) · [Layout](#repository-layout) · [PDF constraints](#pdf-vs-your-constraint)
 
-- **Root `package.json` + `package-lock.json`** — pins **`@playwright/test`** so `scripts/playwright.config.ts` (under `scripts/`) and `generated_test/**/*.spec.ts` resolve the **same** module as **`npx playwright`** from the repo root. Without this, Node cannot find `@playwright/test` from the config path, or the CLI and specs can load two different copies and Playwright throws.
-- **`playwright_template/package.json`** — unchanged supplied template; CI still runs **`npm ci --prefix playwright_template`** for ESLint/Prettier/TypeScript tooling there. The **test runner** for this repo uses the root install.
-- **Root `playwright.config.ts`** — re-exports **`scripts/playwright.config.ts`** so a bare **`npx playwright test`** from the repo root does not fall back to scanning the tree (which would load `playwright_template/tests/**` with a **second** `@playwright/test` and trigger “did not expect test.describe()”).
-- **`scripts/playwright.config.ts`** — integration config (servers + `generated_test/` projects). It is **not** a duplicate of `playwright_template/playwright.config.ts`; the template config still targets `./tests` only.
-- **Minimal root `.gitignore` only** — Git ignores in `playwright_template/.gitignore` do **not** apply to sibling paths like `generated_test/` or repo-root `playwright-report/`. A tiny root `.gitignore` is required so those paths are never committed.
+## Assessment README (PDF checklist 1-9)
 
-### `playwright-report/` and `test-results/`
+The written assessment lists nine README topics. Here is where each is addressed in this file and in the repo.
 
-The PDF requires the CI pipeline to **“Produce test logs or artifacts”** (not to commit report folders into the repo). Locally and in CI, Playwright writes HTML + JUnit under these paths; they are **gitignored** and **uploaded as GitHub Actions artifacts** so reviewers get logs without polluting git.
+### 1. LLM prompt design
+
+Prompts live in `scripts/generate-tests.js` (not a separate template file): a shared style block (Playwright conventions, `toHaveProperty` semantics, API vs E2E scope) plus **API** and **E2E** bodies built from real inputs. API prompts attach Swagger JSON, a short path summary, optional `example-api.spec.ts` for tone only, and **`apiImplementationNotes()`** so expectations match `main.go` where OpenAPI is wrong or vague. E2E prompts embed the full **`page.tsx`** so the model sees real `name` attributes, button labels, and success copy. Gemini is called with a modest temperature; output is stripped of markdown fences before validation.
+
+### 2. How Swagger is translated into Playwright tests
+
+The generator reads `application_code/docs/swagger.json` as the source of paths and schemas. The prompt does **not** treat the spec as truth for every status or message: it merges OpenAPI with **handler behavior** (see `apiImplementationNotes()`). The model emits `request.get/post/fetch` against **relative** `/api/...` URLs; `scripts/playwright.config.ts` sets `baseURL` to the local Go server so tests stay portable.
+
+### 3. How the generation process works
+
+Run `node scripts/generate-tests.js` with `LLM_API_KEY` set. The script finds Swagger, reads UI source for E2E, calls Gemini twice (API suite, then E2E suite), runs **`validatePlaywrightCode`**, then writes `generated_test/api/generated.spec.ts` and `generated_test/e2e/generated.spec.ts`. Locally you can use disk cache under `.cache/`; CI sets **`LLM_SKIP_CACHE=1`** so every pipeline run regenerates. If a generated file is missing, the script skips cache for that suite so you are not stuck on stale output.
+
+### 4. How CI gates production
+
+`.github/workflows/ci.yml` is the gate: install dependencies and browsers, **generate** tests, then **`npx playwright test`**. Any failing step fails the workflow, so a pull request cannot merge green unless generation and both API and E2E runs succeed. The same pattern is what you would wire in front of a deployment job (identical artifact: “only promote if this workflow passed”). HTML and JUnit outputs are uploaded as **artifacts** for review. **workflow_dispatch** lets you run the full pipeline without a new commit.
+
+### 5. How this approach scales to many endpoints
+
+See [Scaling to many endpoints](#scaling-to-many-endpoints). In short: **shard** the OpenAPI document by tag or prefix and generate multiple smaller files or `test.describe` blocks; add **schema-based** response checks when the spec grows; keep **cache keys** derived from hashed spec slices and bump an internal prompt version when instructions change.
+
+### 6. How to prevent or detect incorrect / hallucinated AI-generated tests
+
+See [Quality, hallucinations, flakes](#quality-hallucinations-flakes). In short: **structural** checks before write; prompts grounded in `main.go` and `page.tsx`; prefer **tolerant** assertions (`toMatchObject`, short regex) over brittle prose matching; optional next step is **`tsc --noEmit`** on generated files in CI.
+
+### 7. How to handle flaky or unstable tests
+
+See [Quality, hallucinations, flakes](#quality-hallucinations-flakes). In short: CI **retries**, **single worker**, and **traces / screenshots / video** on failure; fix root causes (server readiness, timeouts) rather than stacking `waitForTimeout`. Cold **Go + Next** startup is the usual stressor in this project.
+
+### 8. How the LLM generates E2E selectors and keeps them stable
+
+The E2E prompt injects **`page.tsx`** and tells the model to prefer **`input[name="…"]`** and **`getByRole`** for buttons, because labels are not always wired with `htmlFor`. Success is asserted from **user-visible** copy that exists in the source. The prompt also warns about **ambiguous** text (e.g. a substring that matches both a debug button and a status banner) so Playwright strict mode does not fail for the wrong reason.
+
+### 9. How to prevent flaky frontend tests
+
+Beyond §7: use **deterministic** test data (fixed card numbers, amounts), avoid assertions tied to **animation** timing, wait on **locators** or network stability instead of arbitrary sleeps, and keep E2E tests **independent** (no order dependency). Running against a **local** `webServer` in CI reduces external noise compared to hitting shared staging environments.
+
+## Repo map
+
+| Piece | Role |
+|--------|------|
+| `scripts/generate-tests.js` | Calls Gemini; reads Swagger + `page.tsx`; writes `generated_test/api` and `generated_test/e2e` specs. |
+| `scripts/playwright.config.ts` | Integration Playwright config: dual `webServer` (Go :8080, Next :3000), API + E2E projects. |
+| Root `playwright.config.ts` | Re-exports the script config so `npx playwright test` from the repo root does not pick up `playwright_template/tests`. |
+| Root `package.json` | Pins `@playwright/test` so the CLI and generated specs share one install (see troubleshooting if imports break). |
+| `.github/workflows/ci.yml` | Install → generate tests → Playwright → upload HTML + JUnit artifacts. |
+| `playwright_template/`, `application_code/` | **Read-only** for this submission; generator only reads Swagger, `page.tsx`, and the template’s example API spec for style. |
+
+**Assessment note:** The written brief mentions a generic checkout (name, shipping address, …). The **supplied** UI is a **payment** checkout (`page.tsx`: email, card, expiry, CVV, amount). E2E tests are generated from that file, so they follow the **real** flow (fill → pay → success), not the PDF’s example field names.
+
+### Reports
+
+Playwright writes HTML under `playwright-report/` and JUnit under `test-results/`. Both are gitignored; CI uploads them as **artifacts** so you get logs without committing reports.
 
 ## LLM prompt design
 
-- **API tests**: Loads `application_code/docs/swagger.json`, optionally includes `playwright_template/tests/api/example-api.spec.ts` as a style reference (read-only), and injects **implementation notes** aligned with `main.go` (checkout returns 200 after successful decode; `validate-email` returns HTTP 500; validate-card uses Luhn with HTTP 200 + `valid`).
-- **E2E tests**: Embeds `application_code/app/page.tsx` in the prompt so the model targets the real form (`name` attributes, button copy, success message pattern).
-- **Output hygiene**: No markdown fences; `sanitizeLLMOutput` strips code fences; `validatePlaywrightCode` checks for `test`, `expect`, `@playwright/test`, `async`, and `request` vs `page`.
+- **API:** Load `application_code/docs/swagger.json`, optional style hint from `playwright_template/tests/api/example-api.spec.ts`, plus short **implementation notes** aligned with `main.go` (status codes and shapes the spec often gets wrong).
+- **E2E:** Embed `application_code/app/page.tsx` so selectors and copy match what is actually rendered.
+- **Cleanup:** Strip markdown fences from model output; run a small **structural** check (`validatePlaywrightCode`) before writing files.
 
 ## How Swagger becomes Playwright tests
 
-OpenAPI describes shapes; the prompt adds handler-accurate status/body expectations. Generated API tests call **relative paths** (`/api/health`, etc.) with `baseURL` set in `scripts/playwright.config.ts` to `http://127.0.0.1:8080`.
+OpenAPI gives paths and schemas; the prompt ties expectations to **real handler behavior** where it diverges from the doc. API tests use **relative** URLs (`/api/…`); `baseURL` in `scripts/playwright.config.ts` points at `http://127.0.0.1:8080`.
 
 ## Generation workflow
 
-1. `scripts/generate-tests.js` resolves Swagger under `application_code/docs/`.
-2. Gemini (`gemini-2.5-flash`) returns TypeScript for API + E2E suites.
-3. Output is written only under `generated_test/api/generated.spec.ts` and `generated_test/e2e/generated.spec.ts` by **that script only** — these paths are **gitignored** and must not be committed or hand-edited (no checked-in copies).
-4. Optional disk cache under `.cache/` (keys: Swagger + prompt version for API, `page.tsx` + prompt version for E2E). **If you delete a `generated.spec.ts` file, the next run skips disk cache for that suite and calls the LLM again** (so “delete file = regenerate” matches intuition). To force fresh output even when files exist, set `LLM_SKIP_CACHE=1` or remove `.cache/`. CI sets `LLM_SKIP_CACHE=1` so each pipeline run is uncached. The PDF lists intelligent caching as **bonus** signal, not a requirement to hide regeneration behind deletes.
+1. Resolve Swagger under `application_code/docs/`.
+2. Call Gemini (`gemini-2.5-flash`) for API + E2E TypeScript.
+3. Write `generated_test/api/generated.spec.ts` and `generated_test/e2e/generated.spec.ts` (only via this script; paths are gitignored).
+4. Optional `.cache/` disk cache for local speed. CI sets `LLM_SKIP_CACHE=1` for a clean generation each run. Delete a generated file to force a refresh for that suite; bump the prompt cache tag in code when you change instructions.
 
 ### Regenerate locally
 
@@ -52,83 +102,63 @@ npx playwright install --with-deps chromium
 export LLM_API_KEY="your-gemini-key"
 node scripts/generate-tests.js
 npx playwright test
-# same as: npx playwright test -c scripts/playwright.config.ts (root playwright.config.ts re-exports it)
 ```
 
-The config starts `go run main.go` (port **8080**) and `npm run dev` for Next (port **3000**) with `cwd` set to `application_code/`, then runs specs under `generated_test/`.
+`scripts/playwright.config.ts` starts `go run main.go` (8080) and `npm run dev` for Next (3000) under `application_code/`, then runs tests in `generated_test/`.
 
 ## How CI gates merges
 
-Workflow file: **`.github/workflows/ci.yml`** (standard GitHub Actions location; the PDF’s suggested `scripts/github_action.yaml` layout is equivalent).
+Workflow: `.github/workflows/ci.yml`.
 
-**Triggers:** `push` to **`main`**, **`pull_request`**, and **`workflow_dispatch`**. Use **Actions → “AI Test Generation & Quality Gate” → Run workflow** to run **generate + Playwright** on demand without pushing a commit (still uses branch code + repo **secrets**).
+**When it runs:** push to `main`, pull requests, and **workflow_dispatch** (Actions → “AI Test Generation & Quality Gate” → Run workflow — no commit required).
 
-The job runs **`npm ci`** at the repo root (Playwright runner), `npm ci --prefix playwright_template`, and `npm ci --prefix application_code`, installs Chromium with **`npx playwright install`**, runs **`node scripts/generate-tests.js`** with **`secrets.LLM_API_KEY`**, then **`npx playwright test`** (root `playwright.config.ts` re-exports `scripts/playwright.config.ts`). HTML and JUnit artifacts are uploaded from the repo root output folders. A failing Playwright step **fails the check**, so PRs are gated the same way a deployment gate would use this workflow.
+**Steps:** `npm ci` at repo root and under `playwright_template` / `application_code` → install Chromium → `node scripts/generate-tests.js` (uses `secrets.LLM_API_KEY`) → `npx playwright test`. Failure at any step fails the job (PR gate). Artifacts: HTML report + JUnit.
 
 ### Secrets
 
-- **Local**: `export LLM_API_KEY=...`
-- **GitHub**: Repository secret `LLM_API_KEY` (never committed).
+- Local: `export LLM_API_KEY=…`
+- GitHub: repository secret `LLM_API_KEY` (never commit the key).
 
 ### CI job failed?
 
-1. **`LLM_API_KEY` missing** — The workflow fails fast with an error if the secret is empty. Fork pull requests do not receive repository secrets; run CI from a branch on the same repo or use a maintainer flow that supplies the key.
-2. **`Restore cache failed … go.sum`** — Ensure `application_code/go.sum` is committed (generated with `go mod tidy` in `application_code/`). `setup-go` caches modules using that file.
-3. **`npm ci` … `package-lock.json`** — `npm ci` in `application_code/` requires a committed **`application_code/package-lock.json`**. It was previously gitignored; remove that ignore line, run `npm install` in `application_code/`, and commit the lockfile.
-4. **No `playwright-report/` or `test-results/` artifacts** — Usually means Playwright exited before reporters wrote files (e.g. generation failed, webServer timeout, or tests crashed immediately). Open the failed step log above the artifact warnings.
-5. **Node / Actions deprecation notices** — The workflow pins current majors (`checkout@v6`, `setup-node@v6`, `setup-go@v6`, `upload-artifact@v6`) so the **Actions runtime** uses Node.js 24 per GitHub’s timeline. Your **app** still runs on **Node 22** via `node-version` in `setup-node` (Next/Playwright compatible).
-6. **`Cannot find module '@playwright/test'`** — Run **`npm ci`** at the repo root so `node_modules/@playwright/test` exists (see root `package.json`). Use **`npx playwright`** from the root, not only `npm exec --prefix playwright_template`, so the CLI and generated specs use the same install.
-7. **`Requiring @playwright/test second time` / `did not expect test.describe()`** — Usually two different installs (e.g. CLI from `playwright_template` while specs resolve another copy). Prefer root **`npm ci`** + **`npx playwright test`** as in this README.
+1. Empty **`LLM_API_KEY`** on GitHub, or a **fork PR** without secrets.
+2. Missing **`application_code/go.sum`** or **`application_code/package-lock.json`** (CI uses `npm ci` there).
+3. No artifacts: generation failed, servers did not become ready, or tests crashed before reporters wrote files — read the job log.
+4. **`@playwright/test` / double-load errors:** run `npm ci` at the **repo root** and use **`npx playwright test`** from the root (see root `package.json`).
 
 ## Scaling to many endpoints
 
-- Chunk Swagger by tag or path prefix; emit one file per chunk.
-- Add JSON Schema / openapi-response-validator post-generation.
-- Key cache entries by OpenAPI content hash; invalidate on spec diffs.
+Split large OpenAPI specs **by tag or path prefix** and generate per chunk so prompts stay small and failures are localized. Next hardening: **schema validation** (e.g. openapi-response-validator) on responses. Keep cache keys tied to **spec content** (this script hashes inputs); bump the embedded prompt version when you change generation rules.
 
-## Detecting bad / hallucinated tests
+## Quality, hallucinations, flakes
 
-- Structural checks on generated TS; optional `tsc --noEmit` in CI.
-- Contract tests against fixtures or mocks.
-- Snapshot stable subsets of responses where safe.
+Models invent plausible wrong status codes or messages. This repo only does **light structural validation** before save; adding `tsc --noEmit` on generated files in CI would catch more. For API assertions, prefer **stable fields** (`toMatchObject`, short regex) over long Go error strings that change with Go version.
 
-## Flaky API / UI tests
+**Flakes:** CI uses retries and a single worker; traces/screenshots/video on failure help. Cold Go + Next startup is the usual timeout source. **E2E:** prefer `input[name="…"]` and `getByRole` over long class chains. Avoid `getByText(/backend status/i)` for the debug button test — it matches both the **button** and the **status banner** (strict mode); target the banner copy or a narrower pattern.
 
-- CI retries, traces, screenshots on failure, single worker.
-- Prefer stable locators (`input[name=…]` when labels lack `htmlFor`).
+## Extras in this repo
 
-## E2E selector stability
-
-- Prompt documents that visible labels may not be wired with `htmlFor` and recommends stable `input[name="..."]` locators from `page.tsx`.
-- Submit button matched with `/complete payment|pay/i`.
-- Assert on visible success copy (`Payment processed`).
-
-## Bonus features included
-
-- LLM output caching (disabled in CI).
-- Lightweight structural guardrails on generated code.
-- Dual `webServer` blocks for API + UI.
-- CI artifact uploads.
+Disk cache (skipped in CI), dual `webServer` for API + UI, artifact uploads, `workflow_dispatch` for manual runs.
 
 ## Repository layout
 
 ```
 .
 ├── README.md
-├── .gitignore                # minimal — only paths outside playwright_template/ (see above)
-├── .github/workflows/ci.yml  # quality gate: install → generate tests → Playwright → artifacts
+├── .gitignore
+├── .github/workflows/ci.yml
+├── package.json              # pins @playwright/test for root playwright run
+├── playwright.config.ts      # re-exports scripts/playwright.config.ts
 ├── scripts/
 │   ├── generate-tests.js
-│   └── playwright.config.ts  # integration runner config (template config unchanged)
-├── generated_test/
-│   ├── api/                    # generated.spec.ts produced by scripts/generate-tests.js (ignored by git)
-│   └── e2e/
-├── application_code/       # provided app — do not modify for submission
-└── playwright_template/    # provided template — do not modify for submission
+│   └── playwright.config.ts
+├── generated_test/           # *.spec.ts generated; gitignored
+├── application_code/
+└── playwright_template/
 ```
 
 ## PDF vs. your constraint
 
-The written assessment says **not to modify the Playwright configuration template** (and you are also treating **`application_code/`** as read-only). This layout satisfies that: the stock `playwright_template/playwright.config.ts` and `application_code/next.config.js` stay as supplied; integration is in **`scripts/`** (generator + `scripts/playwright.config.ts`) plus **`.github/workflows/`**, with a **minimal root `.gitignore`** only where Git requires it.
+The assessment requires **not** changing the **Playwright template** config; integration lives in `scripts/playwright.config.ts` and `.github/workflows/ci.yml`. `application_code/` stays as provided.
 
-**README vs. PDF checklist (concise):** (1) Prompt design — § “LLM prompt design”. (2) Swagger → Playwright — § “How Swagger becomes Playwright tests”. (3) Generation — § “Generation workflow”. (4) CI gate — § “How CI gates merges”. (5) Scale — § “Scaling to many endpoints”. (6) Hallucinations — § “Detecting bad / hallucinated tests”. (7–9) Flaky / unstable / E2E selectors — § “Flaky API / UI tests” and “E2E selector stability”. **Secrets** — § “Secrets”. **Bonus** signals — § “Bonus features included”.
+The nine README bullets from the PDF are answered explicitly under **[Assessment README (PDF checklist 1-9)](#assessment-readme-pdf-checklist-1-9)** above; the sections that follow go deeper on implementation details.
