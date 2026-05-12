@@ -4,6 +4,7 @@ const crypto = require("crypto");
 
 const API_KEY = process.env.LLM_API_KEY;
 const MAX_RETRIES = 3;
+const MAX_VALIDATE_ATTEMPTS = 3;
 const LLM_TIMEOUT_MS = 60000;
 
 function repoRoot() {
@@ -58,7 +59,9 @@ PLAYWRIGHT PATTERNS:
 - Use official fixture patterns (${kind === "api" ? "`{ request }` only" : "`{ page }` only"}).
 - Keep tests atomic: no shared mutable state between tests; no order dependency.
 ${kind === "api" ? `- API tests may use test.describe.parallel at the describe level if every test is fully independent (optional).
-- **toHaveProperty(key, value?)** — With two args, \`value\` is an **equality** check on \`obj[key]\`, not a custom failure string. Prefer \`toMatchObject\`, \`expect(obj.field, '…').toBe(…)\`, or \`expect(obj, '…').toHaveProperty('field')\` (single key) then assert values separately.` : ""}
+- **toHaveProperty(key, value?)** — With two args, \`value\` is an **equality** check on \`obj[key]\`, not a custom failure string. Prefer \`toMatchObject\`, \`expect(obj.field, '…').toBe(…)\`, or \`expect(obj, '…').toHaveProperty('field')\` (single key) then assert values separately.
+- **Error / message bodies:** Treat the attached **OpenAPI document** as the contract for status codes and response **shape**. For variable server text (especially Go \`encoding/json\` details), prefer **\`expect(body.error).toContain('short stable substring')\`** — **avoid** \`toMatch(/…long regex…/)\`** and **never** pin full framework error strings (they change with JSON shape: string vs number token, etc.). When the spec only guarantees "400 + error string", asserting **status** + **non-empty \`error\`** + at most **one** short \`toContain\` is enough.
+- **\`toContain\` is case-sensitive** (substring match). If the API returns **Invalid**… do **not** assert \`toContain('invalid')\` lowercase only — use the **exact** substring (\`toContain('Invalid')\`), or \`expect(msg.toLowerCase()).toContain('invalid')\`, or \`expect(msg).toMatch(/invalid/i)\`.` : ""}
 
 LOCATOR & ACCESSIBILITY (${kind === "e2e" ? "E2E" : "N/A for API"}):
 ${kind === "e2e" ? `- Prefer getByRole / getByTestId when data-testid exists in the provided source; otherwise stable locators from source (e.g. input[name="…"]).
@@ -76,6 +79,16 @@ OUT OF SCOPE — DO NOT OUTPUT (missing deps or multi-file layout):
 }
 
 function wrapPrompt(content, kind) {
+  const apiHardRules =
+    kind === "api"
+      ? `
+API — VALIDATOR ENFORCED (generation will be rejected if violated):
+- Never emit the text **cannot unmarshal number into Go struct field** (wrong for many bad payloads; Go often says **cannot unmarshal string** into amount).
+- For /api/checkout **400** \`error\` strings: use **expect(...).toContain('Invalid request:')\` and **expect(...).toContain('json:')\` — not \`toMatch(/…cannot unmarshal number…/)\`.
+- Never emit the regex **/server running/i** for /api/health — the message is **Server is running** (word **is** between); use **/server.*running/i** or exact \`toBe\`.
+`
+      : "";
+
   return `
 You are a senior QA automation engineer writing Playwright TypeScript tests.
 
@@ -84,7 +97,7 @@ OUTPUT CONTRACT (violations will be rejected):
 - No prose, no markdown, no backticks, no "Here is the code" preamble or postscript.
 - Do not use test.only, test.skip, or page.pause().
 - Do not add console.log except for unavoidable debugging (prefer none).
-
+${apiHardRules}
 ${generationStyleGuidelines(kind)}
 
 ${content}
@@ -221,19 +234,17 @@ function safeWrite(filePath, content) {
   fs.renameSync(tempPath, filePath);
 }
 
-/** Implementation truth for this repo (Go handlers may differ from Swagger / OpenAPI prose). */
+/** Hints where OpenAPI is thin; prefer spec status/shape + short toContain — avoid brittle regex on framework errors. */
 function apiImplementationNotes() {
   return `
-BACKEND BEHAVIOR (assert what handlers return, not guessed framework strings):
+BACKEND NOTES (use **OpenAPI** for status codes and response **shape**; do not overspecify free-text errors):
 
-- GET /api/health → 200 { status: "healthy", message: string } (message relates to server running).
+- GET /api/health → 200 { status: "healthy", message: **"Server is running"** } (exact string in this handler). When asserting \`message\`, do **not** use \`/server running/i\` — that requires the contiguous substring **"server running"** but the real text has **"Server is running"** (word **is** in between). Prefer \`expect(message).toMatch(/server.*running/i)\`, or \`expect(message.toLowerCase()).toContain('server'); expect(message.toLowerCase()).toContain('running')\`, or \`toBe('Server is running')\`.
 
-- POST /api/checkout → JSON { cardNumber, expiry, cvv, amount } (\`amount\` is numeric). Success → 200 { status: "success", message }.
-  Decode / type errors → 400 { error: string }; \`error\` starts **Invalid request:** then Go's json detail — **varies a lot** (truncated JSON vs wrong types vs …). Prefer \`toMatch(/^Invalid request:/)\` plus a **broad** tail (\`/json:|cannot unmarshal|invalid character|unexpected end/i\` — any one is enough) or only assert **status 400** + non-empty \`error\`. **Never** require one exact Go phrase (e.g. only \`unexpected end of JSON input\`) or the full struct path (\`main.PaymentRequest\` vs \`PaymentRequest\` differs by build).
+- POST /api/checkout → Body per spec: { cardNumber, expiry, cvv, amount } (\`amount\` must be numeric in JSON). Success → 200 { status: "success", message }. Client/decode failures → **400** with string \`error\` (often prefixed \`Invalid request:\` plus json detail — **wording varies**). Prefer: **assert status** + \`toHaveProperty('error')\` + optional **one** \`expect(errorResponse.error).toContain('Invalid request:')\` or \`.toContain('json:')\` — **use \`toContain\`, not \`toMatch\`**, and do **not** assert a specific "cannot unmarshal number" vs "string" clause.
   To send a **raw broken JSON string**, use **request.fetch** with \`Content-Type: application/json\` and \`data\` as the raw string (avoid relying on \`request.post\` to forward malformed bodies unchanged).
 
-- POST /api/validate-card → decodable JSON → 200 { valid, message }; Luhn-valid PAN example 4242424242424242, invalid 1111111111111111. JSON decode failure → 400 { error: **"Invalid request"** } (static). Odd field names may still decode → often 200 with valid:false.
-  **Real handler messages (ignore Swagger examples):** valid Luhn → \`message\` is **"Card number validated"**; invalid / empty PAN failing Luhn → **"Invalid card number (Luhn check failed)"**. Assert with \`/validated|valid/i\` or \`/Luhn|invalid card/i\` — do **not** require OpenAPI wording like "Card number is valid".
+- POST /api/validate-card → decodable JSON → 200 { valid, message }; Luhn-valid PAN example 4242424242424242, invalid 1111111111111111. JSON decode failure → 400 { error: **"Invalid request"** } (static). Invalid-Luhn **200** responses use a message like **Invalid card number (Luhn check failed)** (capital **I** in Invalid). **\`toContain\` is case-sensitive** — use \`toContain('Invalid')\` / \`toContain('Luhn')\`, or \`expect(message.toLowerCase()).toContain('invalid')\`, not \`toContain('invalid')\` alone.
 
 - POST /api/validate-email → Valid JSON body → **500** { error: **"Email validation service temporarily unavailable"** } (handler always returns this after decode). Malformed JSON before decode → **400** { error: **"Invalid request"** } (same static as validate-card) — **different** shape from checkout's **Invalid request:** + Go detail.
 
@@ -262,7 +273,7 @@ ${apiImplementationNotes()}
 OpenAPI path keys (generate tests primarily for these): ${pathList}
 
 Below: example file from this repo's Playwright template — use only as STYLE reference (import pattern, request usage).
-Do NOT copy fictional endpoints from the example; bind every test to the real paths above and the BACKEND BEHAVIOR block.
+Do NOT copy fictional endpoints from the example; bind every test to the **OpenAPI document** (status + schema) and the short BACKEND NOTES block.
 
 --- example-api.spec.ts (reference style only) ---
 ${exampleSpec}
@@ -275,7 +286,9 @@ ${swagger}
 TASK:
 - Produce one file: import { test, expect } from '@playwright/test'; every test uses async ({ request }) => { ... } (no ApiHelper).
 - Cover health, checkout (success + at least one 400 path), validate-card (Luhn + malformed JSON), validate-email (500 on valid body; optional 400 on bad JSON if you add that case).
-- Assertions: match **BACKEND BEHAVIOR**; OpenAPI **example** strings for \`message\` / errors are often wrong — do not copy them for validate-card or checkout errors. Use tolerant matchers where Go text varies; use **exact** strings only for static bodies (e.g. validate-email 500, decode-failure **Invalid request**).
+- For **GET /api/health** \`message\`, follow the BACKEND NOTES line exactly — never \`/server running/i\`.
+- Assertions: **OpenAPI** defines paths, status codes, and schemas — align expects with the spec. For checkout/JSON **variable** error text use **\`toContain\`** on at most one short substring (see BACKEND NOTES); **do not** use \`toMatch\` with long regex on \`error\`. Use **exact** \`toBe\` only where the spec or BACKEND NOTES gives a fixed string (e.g. validate-email 500 body, validate-card/email decode-failure **Invalid request**). Remember **\`toContain\` is case-sensitive** on API \`message\` / \`error\` strings.
+- **FORBIDDEN (script rejects output):** the literal substring \`cannot unmarshal number into Go struct field\` anywhere in the file, or \`toMatch\` on \`errorResponse.error\` for checkout 400 that assumes unmarshaling a **number**. For "amount not a number" tests use \`toContain('Invalid request:')\` + \`toContain('json:')\` only.
 - One top-level test.describe naming the API suite; return ONLY the TypeScript source (no markdown).
 `;
 }
@@ -343,16 +356,33 @@ async function generateWithCache({
   if (useCache) {
     const cached = readCache(cacheDir, cacheKey);
     if (cached) {
-      console.log("Using cached LLM output for key:", cacheKey.slice(0, 16), "…");
-      return sanitizeLLMOutput(cached);
+      const sanitized = sanitizeLLMOutput(cached);
+      try {
+        validatePlaywrightCode(sanitized, kind);
+        console.log("Using cached LLM output for key:", cacheKey.slice(0, 16), "…");
+        return sanitized;
+      } catch (e) {
+        console.warn("Cached output failed validation — regenerating:", e.message);
+      }
     }
   }
 
-  let output = await callLLM(prompt);
-  output = sanitizeLLMOutput(output);
-  validatePlaywrightCode(output, kind);
-  if (useCache) writeCache(cacheDir, cacheKey, output);
-  return output;
+  for (let attempt = 1; attempt <= MAX_VALIDATE_ATTEMPTS; attempt++) {
+    let output = await callLLM(prompt);
+    output = sanitizeLLMOutput(output);
+    try {
+      validatePlaywrightCode(output, kind);
+      if (useCache) writeCache(cacheDir, cacheKey, output);
+      return output;
+    } catch (err) {
+      console.warn(
+        `Generated ${kind} failed validation (attempt ${attempt}/${MAX_VALIDATE_ATTEMPTS}):`,
+        err.message
+      );
+      if (attempt === MAX_VALIDATE_ATTEMPTS) throw err;
+    }
+  }
+  throw new Error("generateWithCache: exhausted validation attempts without success");
 }
 
 async function generateApiTests(root, cacheDir, useCache) {
@@ -377,7 +407,7 @@ async function generateApiTests(root, cacheDir, useCache) {
     );
   }
 
-  const cacheKey = `${hashContent(swagger + "|api-prompt-v8")}`;
+  const cacheKey = `${hashContent(swagger + "|api-prompt-v13")}`;
   const prompt = wrapPrompt(buildApiPrompt(swagger, example), "api");
   const code = await generateWithCache({
     prompt,
